@@ -6,7 +6,7 @@ using System.Linq;
 using System.Data;
 using System.Text.RegularExpressions;
 
-namespace ConsoleApplication60 {
+namespace ScriptInCSharp {
 
     abstract class Symbol {
         //Describes all objects that can be parsed and evaluated;
@@ -129,13 +129,40 @@ namespace ConsoleApplication60 {
         public const string VARASSIGNMENT = "^(\\$[A-Z]+)=\\( (.+) \\)$";
         public const string ARRAYASSIGNMENT = "^(\\@[A-Z]+)=\\[ ((\\d|,)+) \\]$";
     }
+    
+    class Function: IndirectValue {
+        //Descrive an assignment of a variable in the pattern of $NAME=( <value> );
+        public const string FUNCTIONCALLING = "^(\\#[A-Z]+)\\( ((\\$|\\@)[A-Z]+) \\)$";
+        public const string FUNCTIONNAME = "^(\\#[A-Z]+)";
+
+        private string name;
+        private string varValue;
+        public Function(string name) {
+            if(!Regex.IsMatch(name.Trim(), Function.FUNCTIONCALLING)) {
+                throw new ArgumentException("Array indexing must be in form of ARRAY[ <index> ]. Error in " + name);
+            } else {
+                this.name = name.Trim();
+                this.varValue = "0";
+            }
+        }
+
+        public override string getName() {
+            return this.name;
+        }
+
+        public override void setValue(string value) {
+            this.varValue = value;
+        }
+    }
 
     class Environment {
         private Dictionary<string, Environment.Object> variables;
+        private Dictionary<string, Func<string[], string>> functions;
 
         //Describes all possible settings / variables value that the user can set;
         public Environment() {
             this.variables = new Dictionary<string, Environment.Object>();
+            this.functions = new Dictionary<string, Func<string[], string>>();
         }
 
         //Add a variable;
@@ -150,7 +177,7 @@ namespace ConsoleApplication60 {
 
         }
         //Remove a variable;
-        public void unregisterVariable(string name, string value) {
+        public void unregisterVariable(string name) {
             this.variables.Remove(name);
         }
         //Get the variable value;
@@ -189,6 +216,27 @@ namespace ConsoleApplication60 {
             }
         }
 
+        public string[] getOperand(string name) {
+            if(Regex.IsMatch(name, ArrayValue.ARRAYNAME)) {
+                return (this.variables[name] as ArrayObj).Values.Split(',');
+            } else {
+                return new string[] { this.getVariableValue(name) };
+            }
+        }
+        //Add a variable;
+        public void registerFunction(string name, Func<string[], string> value) {
+            if(Regex.IsMatch(name, Function.FUNCTIONNAME)) {
+                this.functions.Add(name, value);
+            } else { 
+                throw new ArgumentException("Function name can only starts witn #, must not contains numbers and must be UPPERCASE. Error in " + name);
+            }
+
+        }
+        //Remove a variable;
+        public void unregisterFunction(string name) {
+            this.functions.Remove(name);
+        }
+
         private abstract class Object {
 
         }
@@ -223,12 +271,19 @@ namespace ConsoleApplication60 {
             public string Value { get { return this.value; } }
         }
 
+        public Func<string[], string> getFunction(string funcName) {
+            if(Regex.IsMatch(funcName, Function.FUNCTIONNAME)) {
+                return this.functions[funcName];
+            } else {
+                throw new ArgumentException("Function name can only starts with #, must not contains numbers and must be UPPERCASE. Error in " + funcName);
+            }
+        }
     }
 
     class Line {
         private List<Symbol> symbols;
         private bool resolved;
-        public enum Type { NONE, VAR, ARRAY }
+        public enum Type { NONE, VAR, ARRAY, FUNC }
         private Type assignmentType;
         public Type AssignmentType { get { return this.assignmentType; } }
         private string assignmentVar;
@@ -253,6 +308,8 @@ namespace ConsoleApplication60 {
                 }
             }else if(Regex.IsMatch(input, Assignment.ARRAYASSIGNMENT)) {
                 this.assignmentType = Line.Type.ARRAY;
+            }else if(Regex.IsMatch(input, Function.FUNCTIONCALLING)){
+                this.assignmentType = Line.Type.FUNC;
             }
             switch(this.AssignmentType) {
                 case Line.Type.NONE:
@@ -271,6 +328,13 @@ namespace ConsoleApplication60 {
                     break;
                 case Line.Type.ARRAY:
                     m = Regex.Match(input, Assignment.ARRAYASSIGNMENT);
+                    if(m.Success) {
+                        this.assignmentVar = m.Groups[1].Value;
+                        this.value = m.Groups[2].Value;
+                    }
+                    break;
+                case Line.Type.FUNC:
+                    m = Regex.Match(input, Function.FUNCTIONCALLING);
                     if(m.Success) {
                         this.assignmentVar = m.Groups[1].Value;
                         this.value = m.Groups[2].Value;
@@ -305,7 +369,8 @@ namespace ConsoleApplication60 {
                         // use the overridden ToString();
                         return string.Join("", this.symbols);
                     }
-                    case Line.Type.ARRAY:
+                case Line.Type.ARRAY:
+                case Line.Type.FUNC:
                     return this.value;
                 default:
                     return "";
@@ -355,6 +420,8 @@ namespace ConsoleApplication60 {
                 case Line.Type.ARRAY:
                     this.env.registerVariable(line.AssignmentVar, line.getEvalLine());
                     return "NOP";
+                case Line.Type.FUNC:
+                    return this.env.getFunction(line.AssignmentVar)(this.env.getOperand(line.getEvalLine()));
                 default:
                     return "NOP";
             }
@@ -369,6 +436,9 @@ namespace ConsoleApplication60 {
     // 		> operators such as +, -, *, and /
     //      > array declaration in the format of @ARRAY=[ <elements> ] where elements are numbers separated by commas and no space (ie @ARRAY=[ 1,2 ])
     //      > array index extraction in format of ARRAY[<index>] where <index> is a decimal integer number
+    //      > functions in the format of #FUNCTION( $VAR ) or #FUNCTION( @ARRAY )
+    //      > functions with multiple fields are not supported, use an array or smth
+    //      > array index extraction isn't supported in functions calling.
     // 		every symbols must be separated by only ONE space
     // 	to assign a variable syntax is:
     // 		$VARNAME=( <expression> )
@@ -376,6 +446,13 @@ namespace ConsoleApplication60 {
     // 	parentheses are not accepted as precedence operator, to simulate that define a temp variable and process that variable in the next line. eg to make 2 / ( 2 + 9 ):
     // 		$PRECEDENCE=( 2 + 9 )
     // 		2 / $PRECEDENCE
+    //  to call a function with a variable
+    //      #FUNCTION( $VAR )
+    //  to call a function with an array
+    //      #FUNCTION( @ARRAY )
+    //  to call a function with an array element
+    //      $ELEMENT=( ARRAY[9] )
+    //      #FUNCTION( $ELEMENT )
     // CALLER OPTIONS:
     // 	> create an Environment object
     // 	> if wanted it''s possible to use the registerVariable(), unregisterVariable() and getVariableValue() to get and set entual variables name and value. Those variables name must have the correct syntax as specified above.
@@ -386,9 +463,9 @@ namespace ConsoleApplication60 {
     // 	      Syntax  <----------------<<use>> --------- Line <-------<<use>>------- Evaluator --------<<use>>-------> Environment
     //	    + _of()_                                 + AssignmentType                + environment                 + getVariableValue()
     //	          |                                  + AssignmentVar                 + evaluate()                  + registerVariable()
-    //      ______|___________________________                                                                     + unregisterVariable()
-    //     |         |	         |            |                                                                       
-    //  Number    Operand  IndirectValue  Assignment
+    //      ______|__________________________________________                                                      + unregisterVariable()
+    //     |         |	         |            |              |                                                         
+    //  Number    Operand  IndirectValue  Assignment      Function
     //                           |
     //                    _______|_________
     //                   |                 |
@@ -413,9 +490,27 @@ namespace ConsoleApplication60 {
             e.registerVariable("$TWO", "2");
             Console.WriteLine(eval.evaluate(new Line("$ASS / $TWO")));
 
-            Console.WriteLine(eval.evaluate(new Line("@ARRAY=[ 2,3 ]")));
+            Console.WriteLine(eval.evaluate(new Line("@ARRAY=[ 2,3,9 ]")));
             Console.WriteLine(e.getVariableValue("ARRAY[0]"));
             Console.WriteLine(eval.evaluate(new Line("ARRAY[0] + 2")));
+
+            e.registerFunction("#SUM", (i) => {
+                return i.Select((el) => decimal.Parse(el)).Sum().ToString();
+            });
+            e.registerFunction("#MAX", (i) => {
+                return i.Select((el) => decimal.Parse(el)).Max().ToString();
+            });
+            e.registerFunction("#MIN", (i) => {
+                return i.Select((el) => decimal.Parse(el)).Min().ToString();
+            });
+            e.registerFunction("#PRINT", (i) => {
+                return String.Join(" ", i);
+            });
+            Console.WriteLine(eval.evaluate(new Line("#SUM( @ARRAY )")));
+            Console.WriteLine(eval.evaluate(new Line("#MIN( @ARRAY )")));
+            Console.WriteLine(eval.evaluate(new Line("#MAX( @ARRAY )")));
+            eval.evaluate(new Line("$EXTRACTION=( ARRAY[1] )"));
+            Console.WriteLine(eval.evaluate(new Line("#PRINT( $EXTRACTION )")));
 
             Console.ReadKey();
         }
