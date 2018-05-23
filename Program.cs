@@ -8,6 +8,44 @@ using System.Text.RegularExpressions;
 
 namespace ScriptInCSharp {
 
+    public abstract class Preprocessor {
+        // Describes instruction to set the environment;
+        public abstract void Apply(Environment env);
+
+        public static Preprocessor of(string input) {
+            input = input.Trim();
+            if(Regex.IsMatch(input, LabelInstruction.LABELINSTRUCTION)) {
+                return new LabelInstruction(input);
+            } else {
+                throw new NotImplementedException();
+            }
+        }
+    }
+
+    class LabelInstruction: Preprocessor {
+        private string target;
+        private string attribute;
+
+        public const string LABELINSTRUCTION = "^.SET LABEL FOR ([A-Z$@]+) AS \"([^\"]+)\"$";
+
+        public LabelInstruction(string input) {
+            if(!Regex.IsMatch(input.Trim(), LabelInstruction.LABELINSTRUCTION)) {
+                throw new ArgumentException("Preprocessor rules must follow the appropriate syntax. Check your manual. Error in " + input);
+            } else {
+                Match m = Regex.Match(input.Trim(), LabelInstruction.LABELINSTRUCTION);
+                if(m.Success) {
+                    this.target = m.Groups[1].Value;
+                    this.attribute = m.Groups[2].Value;
+                }
+            }
+        }
+
+        public override void Apply(Environment env) {
+            env.setLabel(target, attribute);
+        }
+    }
+
+
     abstract class Symbol {
         //Describes all objects that can be parsed and evaluated;
 
@@ -32,10 +70,24 @@ namespace ScriptInCSharp {
 
     class Operand: Symbol {
         private string type;
+        public Func<double, double, double> Apply { get; private set; }
         //Describes an operator such as +, -, * and /;
         public Operand(string type) {
-            if(type.Trim().IndexOfAny(new[] { '+', '-', '*', '/' }) < 0) {
-                throw new ArgumentException("You can only use + - * / as type. Error in " + type);
+            switch(type.Trim()) {
+                case "+":
+                    this.Apply = (a, b) => { return a + b; };
+                    break;
+                case "-":
+                    this.Apply = (a, b) => { return a - b; };
+                    break;
+                case "*":
+                    this.Apply = (a, b) => { return a * b; };
+                    break;
+                case "/":
+                    this.Apply = (a, b) => { return a / b; };
+                    break;
+                default:
+                    throw new ArgumentException("You can only use + - * / as type. Error in " + type);
             }
             this.type = type.Trim();
         }
@@ -127,12 +179,12 @@ namespace ScriptInCSharp {
     class Assignment: Symbol {
         //Descrive an assignment of a variable in the pattern of $NAME=( <value> );
         public const string VARASSIGNMENT = "^(\\$[A-Z]+)=\\( (.+) \\)$";
-        public const string ARRAYASSIGNMENT = "^(\\@[A-Z]+)=\\[ ((\\d|,)+) \\]$";
+        public const string ARRAYASSIGNMENT = "^(\\@[A-Z]+)=\\[ (([\\d\\.]|,)+) \\]$";
     }
     
     class Function: IndirectValue {
         //Descrive an assignment of a variable in the pattern of $NAME=( <value> );
-        public const string FUNCTIONCALLING = "^(\\#[A-Z]+)\\( ((\\$|\\@)[A-Z]+) \\)$";
+        public const string FUNCTIONCALLING = "^(\\#[A-Z]+)\\( ((\\$|\\@)?[A-Z]+(\\[\\d+\\])?) \\)$";
         public const string FUNCTIONNAME = "^(\\#[A-Z]+)";
 
         private string name;
@@ -155,7 +207,7 @@ namespace ScriptInCSharp {
         }
     }
 
-    class Environment {
+    public class Environment {
         private Dictionary<string, Environment.Object> variables;
         private Dictionary<string, Func<string[], string>> functions;
 
@@ -168,9 +220,17 @@ namespace ScriptInCSharp {
         //Add a variable;
         public void registerVariable(string name, string value) {
             if(Regex.IsMatch(name, Variable.VARIABLE)) {
-                this.variables.Add(name, new Environment.VariableObj(name, value));
+                if(this.variables.ContainsKey(name)) {
+                    this.variables[name] = new Environment.VariableObj(name, value);
+                } else {
+                    this.variables.Add(name, new Environment.VariableObj(name, value));
+                }
             } else if(Regex.IsMatch(name, ArrayValue.ARRAYNAME)) {
-                this.variables.Add(name, new Environment.ArrayObj(name, value.Split(',')));
+                if(this.variables.ContainsKey(name)) {
+                    this.variables[name] = new Environment.ArrayObj(name, value.Split(','));
+                } else {
+                    this.variables.Add(name, new Environment.ArrayObj(name, value.Split(',')));
+                }
             } else {
                 throw new ArgumentException("Variable name can only starts witn $, must not contains numbers and must be UPPERCASE. Error in " + name);
             }
@@ -178,7 +238,9 @@ namespace ScriptInCSharp {
         }
         //Remove a variable;
         public void unregisterVariable(string name) {
-            this.variables.Remove(name);
+            if(this.variables.ContainsKey(name)) {
+                this.variables.Remove(name);
+            }
         }
         //Get the variable value;
         public string getVariableValue(string name) {
@@ -226,7 +288,11 @@ namespace ScriptInCSharp {
         //Add a variable;
         public void registerFunction(string name, Func<string[], string> value) {
             if(Regex.IsMatch(name, Function.FUNCTIONNAME)) {
-                this.functions.Add(name, value);
+                if(this.functions.ContainsKey(name)) {
+                    this.functions[name] = value;
+                } else {
+                    this.functions.Add(name, value);
+                }
             } else { 
                 throw new ArgumentException("Function name can only starts witn #, must not contains numbers and must be UPPERCASE. Error in " + name);
             }
@@ -234,11 +300,13 @@ namespace ScriptInCSharp {
         }
         //Remove a variable;
         public void unregisterFunction(string name) {
-            this.functions.Remove(name);
+            if(this.functions.ContainsKey(name)) {
+                this.functions.Remove(name);
+            }
         }
 
         private abstract class Object {
-
+            public string Label { get; set; } = "";
         }
 
         private class ArrayObj: Environment.Object {
@@ -278,12 +346,30 @@ namespace ScriptInCSharp {
                 throw new ArgumentException("Function name can only starts with #, must not contains numbers and must be UPPERCASE. Error in " + funcName);
             }
         }
+
+        public void setLabel(string target, string label) {
+            if(!this.variables.ContainsKey(target)) {
+                this.registerVariable(target, "");
+            }
+            this.variables[target].Label = label;
+        }
+        public string getLabel(string target) {
+            if(this.variables.ContainsKey(target)) {
+                return this.variables[target].Label;
+            }else {
+                throw new ArgumentException("The variable wasn't defined.");
+            }
+        }
+
+        public void setUp(Preprocessor p) {
+            p.Apply(this);
+        }
     }
 
-    class Line {
+    public class Line {
         private List<Symbol> symbols;
         private bool resolved;
-        public enum Type { NONE, VAR, ARRAY, FUNC }
+        public enum Type { NONE, VAR, ARRAY, FUNC, VARFUNC }
         private Type assignmentType;
         public Type AssignmentType { get { return this.assignmentType; } }
         private string assignmentVar;
@@ -304,7 +390,11 @@ namespace ScriptInCSharp {
                 if(m.Success) {
                     this.assignmentVar = m.Groups[1].Value;
                     input = m.Groups[2].Value;
-                    this.assignmentType = Line.Type.VAR;
+                    if(Regex.IsMatch(input, Function.FUNCTIONCALLING)) {
+                        this.assignmentType = Line.Type.VARFUNC;
+                    } else {
+                        this.assignmentType = Line.Type.VAR;
+                    }
                 }
             }else if(Regex.IsMatch(input, Assignment.ARRAYASSIGNMENT)) {
                 this.assignmentType = Line.Type.ARRAY;
@@ -340,6 +430,9 @@ namespace ScriptInCSharp {
                         this.value = m.Groups[2].Value;
                     }
                     break;
+                case Line.Type.VARFUNC:
+                    this.value = input;
+                    break;
                 default:
                     throw new ArgumentException("Illegal Operation in " + input);
             }
@@ -367,10 +460,16 @@ namespace ScriptInCSharp {
                         throw new ArgumentException("Eventual variable names MUST be resolved");
                     } else {
                         // use the overridden ToString();
+                        if(this.symbols.Count == 3 && this.symbols[1] is Operand) {
+                            return (this.symbols[1] as Operand).Apply(
+                                double.Parse(this.symbols[0].ToString(), System.Globalization.NumberStyles.Any), 
+                                double.Parse(this.symbols[2].ToString(), System.Globalization.NumberStyles.Any)).ToString();
+                        }
                         return string.Join("", this.symbols);
                     }
                 case Line.Type.ARRAY:
                 case Line.Type.FUNC:
+                case Line.Type.VARFUNC:
                     return this.value;
                 default:
                     return "";
@@ -388,15 +487,12 @@ namespace ScriptInCSharp {
         }
     }
 
-    class Evaluator {
+    public class Evaluator {
         private Environment env;
-        private DataTable dt;
 
         //The evaluator itself!;
         public Evaluator(Environment env) {
             this.env = env;
-            //Mystery magical component;
-            dt = new DataTable();
         }
         public Evaluator() : this(new Environment()) { }
 
@@ -409,7 +505,7 @@ namespace ScriptInCSharp {
                 case Line.Type.VAR:
                     try {
                         //Calls the Computed method on the getEvalLine of the passed line. NOTE THAT EVENTUAL VARIABLES ARE RESOLVED!;
-                        result = this.dt.Compute(line.getEvalLine(this.env), "").ToString();
+                        result = line.getEvalLine(this.env);
                         if(line.AssignmentType == Line.Type.VAR) {
                             this.env.registerVariable(line.AssignmentVar, result);
                         }
@@ -422,6 +518,16 @@ namespace ScriptInCSharp {
                     return "NOP";
                 case Line.Type.FUNC:
                     return this.env.getFunction(line.AssignmentVar)(this.env.getOperand(line.getEvalLine()));
+                case Line.Type.VARFUNC:
+                    Match m = Regex.Match(line.getEvalLine(), Function.FUNCTIONCALLING);
+                    if(m.Success) {
+                        this.env.registerVariable(line.AssignmentVar, 
+                            this.env.getFunction(m.Groups[1].Value)(this.env.getOperand(m.Groups[2].Value))
+                        );
+                        return "NOP";
+                    }else {
+                        throw new ArgumentException("Something in your function calling syntax was wrong: check the correct syntax");
+                    }
                 default:
                     return "NOP";
             }
@@ -485,7 +591,11 @@ namespace ScriptInCSharp {
         static void Main(string[] args) {
             Environment e = new Environment();
             Evaluator eval = new Evaluator(e);
-            eval.evaluate(new Line("$ASS=( 2 + 10 )"));
+
+            Preprocessor p = Preprocessor.of(".SET LABEL FOR $AMBER AS \"This is a label\"");
+            e.setUp(p);
+
+            eval.evaluate(new Line("$ASS=( 2 + 10,9 )"));
             Console.WriteLine(e.getVariableValue("$ASS"));
             e.registerVariable("$TWO", "2");
             Console.WriteLine(eval.evaluate(new Line("$ASS / $TWO")));
@@ -511,6 +621,9 @@ namespace ScriptInCSharp {
             Console.WriteLine(eval.evaluate(new Line("#MAX( @ARRAY )")));
             eval.evaluate(new Line("$EXTRACTION=( ARRAY[1] )"));
             Console.WriteLine(eval.evaluate(new Line("#PRINT( $EXTRACTION )")));
+            eval.evaluate(new Line("$EXTRACTION=( #SUM( ARRAY[2] ) )"));
+            Console.WriteLine(eval.evaluate(new Line("#PRINT( $EXTRACTION )")));
+            Console.WriteLine(e.getLabel("$AMBER"));
 
             Console.ReadKey();
         }
